@@ -26,7 +26,7 @@ from langchain_groq import ChatGroq
 # ── Configuration ──────────────────────────────────────────────────────────
 DATA_DIR        = Path("data")
 VECTORSTORE_DIR = Path("vectorstore")
-LLM_MODEL       = "llama3-8b-8192"   # Groq model
+LLM_MODEL       = "mixtral-8x7b-32768"   # Groq model
 EMBED_MODEL     = "sentence-transformers/all-MiniLM-L6-v2"  # Free local embeddings
 CHUNK_SIZE      = 512
 CHUNK_OVERLAP   = 64
@@ -216,7 +216,7 @@ with st.sidebar:
     # Model selector
     groq_model = st.selectbox(
         "🤖 Groq Model",
-        ["llama3-8b-8192", "llama3-70b-8192", "mixtral-8x7b-32768", "gemma2-9b-it"],
+        ["mixtral-8x7b-32768", "llama3-8b-8192", "llama3-70b-8192", "gemma2-9b-it"],
         index=0,
     )
     LLM_MODEL = groq_model
