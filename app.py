@@ -1,13 +1,13 @@
 import streamlit as st
 import os
 import time
-import json
 import tempfile
+import re
+import hashlib
 import numpy as np
 from groq import Groq
 from pypdf import PdfReader
 import faiss
-import requests
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -44,14 +44,17 @@ Infectious Diseases, Haematology & Oncology, Rheumatology & Emergency Medicine.
 Use ONLY the provided context to answer. Be precise, cite drug doses accurately, and flag
 safety-critical information. If the answer is not in the context, say so clearly."""
 
-CHUNK_SIZE   = 600   # characters per chunk
+CHUNK_SIZE    = 600
 CHUNK_OVERLAP = 100
+VOCAB_SIZE    = 8000   # TF-IDF vocabulary size
 
 # ── Session state ─────────────────────────────────────────────────────────────
 for k, v in {
     "messages":    [],
-    "chunks":      [],      # list of {"text":…, "source":…, "page":…}
-    "index":       None,    # faiss index
+    "chunks":      [],
+    "index":       None,
+    "vocab":       None,
+    "idf":         None,
     "docs_loaded": False,
     "groq_client": None,
 }.items():
@@ -59,32 +62,57 @@ for k, v in {
         st.session_state[k] = v
 
 
-# ── Embedding via HuggingFace Inference API (no torch needed) ─────────────────
-HF_API_URL = "https://api-inference.huggingface.co/pipeline/feature-extraction/sentence-transformers/all-MiniLM-L6-v2"
-
-@st.cache_data(show_spinner=False)
-def get_embeddings_hf(texts: tuple) -> np.ndarray:
-    """Call HuggingFace free Inference API — no local torch required."""
-    headers = {"Content-Type": "application/json"}
-    payload = {"inputs": list(texts), "options": {"wait_for_model": True}}
-    resp = requests.post(HF_API_URL, headers=headers, json=payload, timeout=60)
-    resp.raise_for_status()
-    data = resp.json()
-    # API returns list[list[float]]
-    return np.array(data, dtype=np.float32)
+# ── Pure-numpy TF-IDF embeddings (zero external deps) ────────────────────────
+def tokenize(text: str) -> list[str]:
+    text = text.lower()
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    tokens = text.split()
+    # simple bigrams for better medical term matching
+    unigrams = tokens
+    bigrams  = [f"{a}_{b}" for a, b in zip(tokens, tokens[1:])]
+    return unigrams + bigrams
 
 
-def embed_single(text: str) -> np.ndarray:
-    return get_embeddings_hf((text,))[0]
+def build_vocab(all_texts: list[str]) -> tuple[dict, np.ndarray]:
+    """Build vocabulary and IDF from corpus."""
+    from collections import Counter
+    tf_counts = []
+    df_counter = Counter()
+
+    for text in all_texts:
+        tokens = set(tokenize(text))
+        df_counter.update(tokens)
+        tf_counts.append(tokens)
+
+    # pick top VOCAB_SIZE tokens by document frequency
+    top_tokens = [t for t, _ in df_counter.most_common(VOCAB_SIZE)]
+    vocab = {tok: i for i, tok in enumerate(top_tokens)}
+
+    N = len(all_texts)
+    idf = np.zeros(len(vocab), dtype=np.float32)
+    for tok, idx in vocab.items():
+        df = df_counter.get(tok, 0)
+        idf[idx] = np.log((N + 1) / (df + 1)) + 1.0   # smoothed IDF
+
+    return vocab, idf
 
 
-def embed_batch(texts: list[str], batch_size=32) -> np.ndarray:
-    all_vecs = []
-    for i in range(0, len(texts), batch_size):
-        batch = texts[i:i+batch_size]
-        vecs = get_embeddings_hf(tuple(batch))
-        all_vecs.append(vecs)
-    return np.vstack(all_vecs)
+def tfidf_vector(text: str, vocab: dict, idf: np.ndarray) -> np.ndarray:
+    from collections import Counter
+    tokens = tokenize(text)
+    tf = Counter(tokens)
+    total = max(len(tokens), 1)
+    vec = np.zeros(len(vocab), dtype=np.float32)
+    for tok, cnt in tf.items():
+        if tok in vocab:
+            idx = vocab[tok]
+            vec[idx] = (cnt / total) * idf[idx]
+    norm = np.linalg.norm(vec) + 1e-9
+    return vec / norm
+
+
+def embed_texts(texts: list[str], vocab: dict, idf: np.ndarray) -> np.ndarray:
+    return np.vstack([tfidf_vector(t, vocab, idf) for t in texts])
 
 
 # ── PDF parsing ───────────────────────────────────────────────────────────────
@@ -93,12 +121,10 @@ def parse_pdf(file) -> list[dict]:
     chunks = []
     for page_num, page in enumerate(reader.pages):
         text = page.extract_text() or ""
-        # sliding window chunking
         start = 0
         while start < len(text):
-            end = start + CHUNK_SIZE
-            chunk_text = text[start:end].strip()
-            if len(chunk_text) > 50:          # skip tiny fragments
+            chunk_text = text[start:start + CHUNK_SIZE].strip()
+            if len(chunk_text) > 50:
                 chunks.append({
                     "text":   chunk_text,
                     "source": file.name,
@@ -114,30 +140,29 @@ def build_index(pdf_files):
     progress = st.progress(0, text="Parsing PDFs…")
 
     for i, f in enumerate(pdf_files):
-        progress.progress((i + 0.5) / len(pdf_files), text=f"Parsing {f.name}…")
+        progress.progress((i + 0.5) / len(pdf_files), text=f"Parsing: {f.name}")
         all_chunks.extend(parse_pdf(f))
 
-    progress.progress(0.8, text="Generating embeddings (HF API)…")
+    progress.progress(0.7, text="Building vocabulary…")
     texts = [c["text"] for c in all_chunks]
-    vecs  = embed_batch(texts)
+    vocab, idf = build_vocab(texts)
 
-    # L2-normalise for cosine similarity
-    norms = np.linalg.norm(vecs, axis=1, keepdims=True) + 1e-9
-    vecs  = vecs / norms
+    progress.progress(0.85, text="Vectorising chunks…")
+    vecs = embed_texts(texts, vocab, idf)
 
+    progress.progress(0.95, text="Building FAISS index…")
     dim   = vecs.shape[1]
-    index = faiss.IndexFlatIP(dim)   # Inner Product = cosine after normalisation
+    index = faiss.IndexFlatIP(dim)
     index.add(vecs)
 
     progress.progress(1.0, text="Done!")
     progress.empty()
-    return all_chunks, index
+    return all_chunks, index, vocab, idf
 
 
 # ── Retrieval ─────────────────────────────────────────────────────────────────
 def retrieve(query: str, k: int = 5):
-    vec = embed_single(query)
-    vec = vec / (np.linalg.norm(vec) + 1e-9)
+    vec = tfidf_vector(query, st.session_state.vocab, st.session_state.idf)
     vec = vec.reshape(1, -1)
     _, ids = st.session_state.index.search(vec, k)
     results = [st.session_state.chunks[i] for i in ids[0] if i >= 0]
@@ -175,9 +200,11 @@ with st.sidebar:
     if uploaded:
         if st.button("🔄 Build Knowledge Base", use_container_width=True):
             try:
-                chunks, index = build_index(uploaded)
+                chunks, index, vocab, idf = build_index(uploaded)
                 st.session_state.chunks      = chunks
                 st.session_state.index       = index
+                st.session_state.vocab       = vocab
+                st.session_state.idf         = idf
                 st.session_state.docs_loaded = True
                 st.success(f"✅ Indexed {len(chunks)} chunks from {len(uploaded)} PDFs")
             except Exception as e:
@@ -195,7 +222,7 @@ with st.sidebar:
         st.session_state.messages = []
         st.rerun()
 
-    st.caption("Embeddings: HF Inference API · Vector DB: FAISS · LLM: Groq")
+    st.caption("Embeddings: TF-IDF (local) · Vector DB: FAISS · LLM: Groq")
 
 
 # ── Main UI ───────────────────────────────────────────────────────────────────
@@ -204,9 +231,9 @@ st.markdown('<div class="sub-header">Evidence-based clinical guidelines · Power
             unsafe_allow_html=True)
 
 c1, c2, c3 = st.columns(3)
-c1.metric("API",    "✅ Ready"  if st.session_state.groq_client else "❌ No Key")
-c2.metric("KB",     "✅ Loaded" if st.session_state.docs_loaded else "⚠️ Empty")
-c3.metric("Model",  selected_model.split("-")[0].upper())
+c1.metric("API",   "✅ Ready"  if st.session_state.groq_client else "❌ No Key")
+c2.metric("KB",    "✅ Loaded" if st.session_state.docs_loaded else "⚠️ Empty")
+c3.metric("Model", selected_model.split("-")[0].upper())
 
 st.divider()
 
