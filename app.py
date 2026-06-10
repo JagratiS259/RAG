@@ -1,13 +1,7 @@
-"""
-Healthcare RAG — Clinical Decision Support
-Streamlit Web App | Powered by Google Gemini + LangChain + FAISS
-Run locally: streamlit run app.py
-"""
-
 import os
 import streamlit as st
 from pathlib import Path
-
+ 
 # ── LangChain + Gemini imports ─────────────────────────────────────────────
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -16,7 +10,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.prompts import PromptTemplate
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
-
+ 
 # ── Configuration ──────────────────────────────────────────────────────────
 DATA_DIR        = Path("data")
 VECTORSTORE_DIR = Path("vectorstore")
@@ -25,10 +19,10 @@ LLM_MODEL       = "gemini-1.5-flash"
 CHUNK_SIZE      = 512
 CHUNK_OVERLAP   = 64
 TOP_K           = 5
-
+ 
 DATA_DIR.mkdir(exist_ok=True)
 VECTORSTORE_DIR.mkdir(exist_ok=True)
-
+ 
 # ── Clinical Prompt ────────────────────────────────────────────────────────
 CLINICAL_PROMPT = PromptTemplate(
     input_variables=["context", "question"],
@@ -38,23 +32,23 @@ If the answer is not in the context, say: "I cannot find sufficient clinical
 evidence in the provided documents for this question."
 Never fabricate drug dosages, diagnoses, or treatment protocols.
 Structure your answer with clear bullet points where appropriate.
-
+ 
 Context:
 {context}
-
+ 
 Clinical Question:
 {question}
-
+ 
 Evidence-Based Clinical Answer:"""
 )
-
+ 
 # ── Helper functions ───────────────────────────────────────────────────────
 def get_embeddings(api_key: str):
     return GoogleGenerativeAIEmbeddings(
         model=EMBED_MODEL,
         google_api_key=api_key,
     )
-
+ 
 def load_documents():
     docs = []
     for p in DATA_DIR.glob("**/*.pdf"):
@@ -62,14 +56,14 @@ def load_documents():
     for p in DATA_DIR.glob("**/*.txt"):
         docs.extend(TextLoader(str(p), encoding="utf-8").load())
     return docs
-
+ 
 def split_documents(docs):
     return RecursiveCharacterTextSplitter(
         chunk_size=CHUNK_SIZE,
         chunk_overlap=CHUNK_OVERLAP,
         separators=["\n\n", "\n", ". ", " ", ""],
     ).split_documents(docs)
-
+ 
 @st.cache_resource(show_spinner=False)
 def load_vectorstore_cached(api_key: str):
     return FAISS.load_local(
@@ -77,7 +71,7 @@ def load_vectorstore_cached(api_key: str):
         get_embeddings(api_key),
         allow_dangerous_deserialization=True,
     )
-
+ 
 @st.cache_resource(show_spinner=False)
 def get_llm(api_key: str):
     return ChatGoogleGenerativeAI(
@@ -85,19 +79,26 @@ def get_llm(api_key: str):
         google_api_key=api_key,
         temperature=0,
     )
-
+ 
 def build_rag_chain(vs, llm):
-    return RetrievalQA.from_chain_type(
-        llm=llm,
-        chain_type="stuff",
-        retriever=vs.as_retriever(
-            search_type="similarity",
-            search_kwargs={"k": TOP_K}
-        ),
-        return_source_documents=True,
-        chain_type_kwargs={"prompt": CLINICAL_PROMPT},
+    retriever = vs.as_retriever(search_type="similarity", search_kwargs={"k": TOP_K})
+ 
+    def format_docs(docs):
+        return "
+ 
+".join(doc.page_content for doc in docs)
+ 
+    chain = (
+        RunnablePassthrough.assign(
+            context=lambda x: format_docs(retriever.invoke(x["query"])),
+            question=lambda x: x["query"],
+        )
+        | CLINICAL_PROMPT
+        | llm
+        | StrOutputParser()
     )
-
+    return retriever, chain
+ 
 # ── Page Setup ─────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="Clinical Decision Support",
@@ -105,13 +106,13 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
-
+ 
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
-
+ 
 html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
-
+ 
 .main-header {
     background: linear-gradient(135deg, #1a5276 0%, #1abc9c 100%);
     padding: 1.5rem 2rem;
@@ -121,7 +122,7 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 }
 .main-header h1 { margin: 0; font-size: 1.8rem; font-weight: 600; }
 .main-header p  { margin: 0.3rem 0 0; opacity: 0.85; font-size: 0.95rem; }
-
+ 
 .answer-box {
     background: #eaf4fb;
     border-left: 5px solid #1a73e8;
@@ -162,48 +163,48 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 .stat-card span { font-size: 1.3rem; font-weight: 700; display: block; }
 </style>
 """, unsafe_allow_html=True)
-
+ 
 # ── Sidebar ────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## ⚙️ Settings")
-
+ 
     api_key = st.text_input(
         "🔑 Gemini API Key",
         type="password",
         placeholder="Paste your API key here",
         help="Get your key at https://aistudio.google.com/app/apikey",
     )
-
+ 
     if not api_key:
         api_key = os.environ.get("GOOGLE_API_KEY", "")
-
+ 
     if api_key:
         os.environ["GOOGLE_API_KEY"] = api_key
         st.success("✅ API Key set")
     else:
         st.warning("⚠️ Enter your Gemini API key to begin")
-
+ 
     st.divider()
     st.markdown("## 📂 Document Index")
-
+ 
     uploaded_files = st.file_uploader(
         "Upload Medical Documents",
         type=["pdf", "txt"],
         accept_multiple_files=True,
         help="Upload clinical guidelines, drug references, or protocols",
     )
-
+ 
     if uploaded_files:
         for uf in uploaded_files:
             (DATA_DIR / uf.name).write_bytes(uf.read())
         st.success(f"Uploaded {len(uploaded_files)} file(s)")
-
+ 
     all_files = list(DATA_DIR.glob("**/*.pdf")) + list(DATA_DIR.glob("**/*.txt"))
     if all_files:
         st.markdown(f"**{len(all_files)} file(s) in library:**")
         for f in all_files:
             st.markdown(f"• {f.name}")
-
+ 
     if st.button("🔄 Build / Rebuild Index", type="primary", use_container_width=True):
         if not api_key:
             st.error("Please enter your Gemini API key first!")
@@ -216,7 +217,7 @@ with st.sidebar:
                 vs.save_local(str(VECTORSTORE_DIR))
                 load_vectorstore_cached.clear()
                 st.success(f"✅ Indexed {len(chunks)} chunks from {len(docs)} pages!")
-
+ 
     st.divider()
     st.markdown("""
     <div style='font-size:0.8rem; color:#666;'>
@@ -226,7 +227,7 @@ with st.sidebar:
     Vector DB: FAISS (local)
     </div>
     """, unsafe_allow_html=True)
-
+ 
     st.divider()
     st.markdown("""
     <div style='font-size:0.78rem; color:#888;'>
@@ -234,7 +235,7 @@ with st.sidebar:
     Validate all outputs with a licensed clinician.
     </div>
     """, unsafe_allow_html=True)
-
+ 
 # ── Main Panel ─────────────────────────────────────────────────────────────
 st.markdown("""
 <div class='main-header'>
@@ -242,14 +243,14 @@ st.markdown("""
   <p>Evidence-based answers grounded in your medical document library · Powered by Google Gemini</p>
 </div>
 """, unsafe_allow_html=True)
-
+ 
 st.markdown("""
 <div class='disclaimer'>
 ⚠️ <strong>For professional use only.</strong> This tool provides decision support based on uploaded documents.
 All clinical decisions must be validated by qualified healthcare professionals.
 </div>
 """, unsafe_allow_html=True)
-
+ 
 EXAMPLES = [
     "What is the first-line treatment for community-acquired pneumonia?",
     "What are the diagnostic criteria for sepsis and the Hour-1 Bundle?",
@@ -258,9 +259,9 @@ EXAMPLES = [
     "What is the preferred treatment for H. pylori eradication?",
     "What are the first-line antihypertensive agents for a diabetic patient?",
 ]
-
+ 
 st.subheader("💬 Ask a Clinical Question")
-
+ 
 col_ex, col_gap = st.columns([3, 1])
 with col_ex:
     selected_example = st.selectbox(
@@ -268,7 +269,7 @@ with col_ex:
         ["— type your own question below —"] + EXAMPLES,
         label_visibility="collapsed",
     )
-
+ 
 question = st.text_area(
     "Clinical Question",
     value="" if selected_example.startswith("—") else selected_example,
@@ -276,14 +277,14 @@ question = st.text_area(
     placeholder="e.g. What antibiotic is recommended for community-acquired pneumonia in ICU patients?",
     label_visibility="collapsed",
 )
-
+ 
 ask_col, clear_col, _ = st.columns([1, 1, 4])
 with ask_col:
     ask_btn = st.button("🔍 Ask", type="primary", use_container_width=True)
 with clear_col:
     if st.button("🗑️ Clear", use_container_width=True):
         st.rerun()
-
+ 
 # ── Process Query ───────────────────────────────────────────────────────────
 if ask_btn:
     if not api_key:
@@ -297,15 +298,13 @@ if ask_btn:
             try:
                 vs    = load_vectorstore_cached(api_key)
                 llm   = get_llm(api_key)
-                chain = build_rag_chain(vs, llm)
-                result = chain({"query": question})
-
-                answer  = result["result"]
-                sources = result["source_documents"]
-
+                retriever, chain = build_rag_chain(vs, llm)
+                sources = retriever.invoke(question)
+                answer  = chain.invoke({"query": question})
+ 
                 st.markdown("### 🩺 Clinical Answer")
                 st.markdown(f"<div class='answer-box'>{answer}</div>", unsafe_allow_html=True)
-
+ 
                 st.markdown("<br>", unsafe_allow_html=True)
                 s1, s2, s3 = st.columns(3)
                 with s1:
@@ -316,7 +315,7 @@ if ask_btn:
                 with s3:
                     total_chars = sum(len(d.page_content) for d in sources)
                     st.markdown(f"<div class='stat-card'><span>{total_chars:,}</span>Chars Analyzed</div>", unsafe_allow_html=True)
-
+ 
                 st.markdown("<br>**📚 Source Documents Used:**", unsafe_allow_html=True)
                 for i, doc in enumerate(sources, 1):
                     src     = Path(doc.metadata.get("source", "unknown")).name
@@ -328,7 +327,7 @@ if ask_btn:
                         <em>{excerpt}…</em>
                     </div>
                     """, unsafe_allow_html=True)
-
+ 
             except Exception as e:
                 st.error(f"❌ Error: {str(e)}")
                 st.info("💡 Make sure your API key is valid and the index is built.")
