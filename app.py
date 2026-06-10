@@ -83,7 +83,6 @@ def get_llm(api_key: str):
         model=LLM_MODEL,
         google_api_key=api_key,
         temperature=0,
-        convert_system_message_to_human=True,
     )
 
 def build_rag_chain(vs, llm):
