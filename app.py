@@ -21,7 +21,7 @@ from langchain_groq import ChatGroq
 # ── Configuration ──────────────────────────────────────────────────────────
 DATA_DIR        = Path("data")
 VECTORSTORE_DIR = Path("vectorstore")
-LLM_MODEL       = "llama3-70b-8192"   # Groq model
+LLM_MODEL       = "llama3-8b-8192"   # Groq model
 EMBED_MODEL     = "sentence-transformers/all-MiniLM-L6-v2"  # Free local embeddings
 CHUNK_SIZE      = 512
 CHUNK_OVERLAP   = 64
