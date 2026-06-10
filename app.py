@@ -1,3 +1,10 @@
+
+"""
+Healthcare RAG — Clinical Decision Support
+Streamlit Web App | Powered by Google Gemini + LangChain + FAISS
+Run locally: streamlit run app.py
+"""
+ 
 import os
 import streamlit as st
 from pathlib import Path
@@ -84,9 +91,7 @@ def build_rag_chain(vs, llm):
     retriever = vs.as_retriever(search_type="similarity", search_kwargs={"k": TOP_K})
  
     def format_docs(docs):
-        return "
- 
-".join(doc.page_content for doc in docs)
+        return "\n\n".join(doc.page_content for doc in docs)
  
     chain = (
         RunnablePassthrough.assign(
