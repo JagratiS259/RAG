@@ -1,6 +1,6 @@
 # 🏥 Medical RAG Chatbot
 
-A Retrieval-Augmented Generation (RAG) chatbot for evidence-based clinical guidelines, powered by **Groq LLM**, **FAISS** vector search, and **Streamlit**.
+#A Retrieval-Augmented Generation (RAG) chatbot for evidence-based clinical guidelines, powered by **Groq LLM**, **FAISS** vector search, and **Streamlit**.
 
 ---
 
